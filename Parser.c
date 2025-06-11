@@ -26,7 +26,9 @@
 
 
     void printImports(DWORD importRVA) {
-        DWORD importOffset = rvaToOffset(importRVA, sectionHeaders); //use the function and get the import offset
+        DWORD importOffset = rvaToOffset(importRVA, sectionHeaders);
+         //use the function and get the import offset
+ 
         fseek(file, importOffset, SEEK_SET);//put the curser of the file at the start, ranging across the import offset
 
         IMAGE_IMPORT_DESCRIPTOR importDesc; //declaration
@@ -38,6 +40,10 @@
                 break;
 
             DWORD nameOffset = rvaToOffset(importDesc.Name, sectionHeaders); //use the function and get the offset of the certain import
+            if (nameOffset == 0) {
+                fprintf(stderr, "Failed to convert Name RVA to offset: 0x%X\n", importDesc.Name);
+                break;
+            }
             fseek(file, nameOffset, SEEK_SET); //put curser at the start of the file
             printf("Reading DLL name RVA: 0x%X\n", importDesc.Name);
 
@@ -51,6 +57,8 @@
 void printExports(IMAGE_SECTION_HEADER* sectionHeaders) {
     DWORD exportRVA = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress; //get the VA of exports, inside the ntheaders and then the optional header,dataDIR
     DWORD exportOffset = rvaToOffset(exportRVA, sectionHeaders); //use the function and get the export offset
+    
+
     fseek(file, exportOffset, SEEK_SET);//put the curser where the offset begins at the start of it
 
     IMAGE_EXPORT_DIRECTORY exportDirectory;
@@ -74,7 +82,7 @@ void printExports(IMAGE_SECTION_HEADER* sectionHeaders) {
     
 int main(){
     printf("program started");
-    file = fopen("C:\\Windows\\System32\\notepad.exe", "rb");
+    file = fopen("testPE.exe", "rb");
     if (!file) {
         printf("Failed to open file\n");
         return 1;
