@@ -4,128 +4,122 @@
 #include <windows.h>
 #include <winnt.h>
 
-    IMAGE_DOS_HEADER dosHeader;
-    IMAGE_NT_HEADERS ntHeaders;
-    IMAGE_SECTION_HEADER* sectionHeaders;
-    
-    FILE *file; //declaring outside of all functions so that they could use it
-    DWORD rvaToOffset(DWORD rva, IMAGE_SECTION_HEADER* sectionHeaders){
-        for(int i = 0; i< ntHeaders.FileHeader.NumberOfSections;i++){
-            DWORD sectionVA = sectionHeaders[i].VirtualAddress; //virtual address
-            DWORD sectionSize = max(sectionHeaders[i].SizeOfRawData, sectionHeaders[i].Misc.VirtualSize);
+typedef struct _PE_FILE {
+    HANDLE   hFile;
+    HANDLE   hMap;
+    PBYTE    Base;       // pointer to start of file in memory
+    SIZE_T   Size;       // file size
 
-            
-            if(rva >= sectionVA && rva < sectionVA +sectionSize ){ //checks if the rva is located inside the virtual range of this section
-                DWORD delta = rva - sectionVA; 
-                return sectionHeaders[i].PointerToRawData +delta; // sectionHeaders[i].PointerToRawData - gives the offset to the raw data in the section and we add the delta to it.
-            }
-        } 
-        fprintf(stderr, "Failed to find RVA offset for: 0x%X\n", rva);
-        return 0;
+    IMAGE_DOS_HEADER*    DosHdr;    
+    IMAGE_NT_HEADERS* NtHeader;
+    IMAGE_SECTION_HEADER* Sections;
+} PE_FILE, *PPE_FILE;
+
+PPE_FILE LoadPeFile(PCHAR FilePath) {
+    PPE_FILE pe = calloc(1, sizeof *pe);
+    if(!pe){
+        return NULL;
+    }
+
+    pe->hFile = CreateFileA(FilePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (pe->hFile == INVALID_HANDLE_VALUE) goto fail;
+
+    pe->hMap = CreateFileMappingA(pe->hFile,NULL,PAGE_READONLY,0, 0,NULL);
+    if (!pe->hMap) goto fail;
+
+    pe->Base = (PBYTE)MapViewOfFile(pe->hMap,FILE_MAP_READ,0,0,0);
+    if (!pe->Base) goto fail;
+
+    pe->Size = GetFileSize(pe->hFile, NULL);
+
+    pe->DosHdr = (IMAGE_DOS_HEADER*)pe->Base;
+    if (pe->DosHdr->e_magic != IMAGE_DOS_SIGNATURE) goto fail;
+    pe->NtHeader = (IMAGE_NT_HEADERS*)(pe->Base + pe->DosHdr->e_lfanew);
+    if (pe->NtHeader->Signature != IMAGE_NT_SIGNATURE) goto fail;
+    pe->Sections = (IMAGE_SECTION_HEADER*)((PBYTE)&pe->NtHeader->OptionalHeader + pe->NtHeader->FileHeader.SizeOfOptionalHeader);
+    return pe;
+
+fail:
+    DestroyPeFile(pe);
+    return NULL;
+}
+
+VOID DestroyPeFile(PPE_FILE pe) {
+    if (!pe) return;
+    if (pe->Base)  UnmapViewOfFile(pe->Base);
+    if (pe->hMap)  CloseHandle(pe->hMap);
+    if (pe->hFile) CloseHandle(pe->hFile);
+    free(pe);
+}
+
+DWORD RvaToOfs(PPE_FILE pe, DWORD Rva) {
+    WORD n = pe->NtHeader->FileHeader.NumberOfSections;
+    for(int i = 0; i<n ;i++){
+    DWORD sectionVA = &pe->Sections[i].VirtualAddress; //virtual address
+    DWORD sectionSize = max(&pe->Sections[i].SizeOfRawData, &pe->Sections[i].Misc.VirtualSize);   
+    if(Rva >= sectionVA && Rva < sectionVA +sectionSize ){ //checks if the rva is located inside the virtual range of this section
+        DWORD delta = Rva - sectionVA; 
+        return &pe->Sections[i].PointerToRawData +delta; // sectionHeaders[i].PointerToRawData - gives the offset to the raw data in the section and we add the delta to it.
+    }
+    } 
+    fprintf(stderr, "Failed to find RVA offset for: 0x%X\n", Rva);
+    return 0;
   }
 
+DWORD ShowImports(PPE_FILE pe) {
+    DWORD ImportRva = pe->NtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    DWORD importOffset = rvaToOffset(ImportRva, &pe->Sections);
+    IMAGE_IMPORT_DESCRIPTOR *importDesc = (IMAGE_IMPORT_DESCRIPTOR*)(pe->Base + importOffset); 
+    while (1) {
+        if (importDesc->OriginalFirstThunk == 0 && importDesc->Name == 0)
+        break;
 
-    void printImports(DWORD importRVA) {
-        DWORD importOffset = rvaToOffset(importRVA, sectionHeaders);
-         //use the function and get the import offset
- 
-        fseek(file, importOffset, SEEK_SET);//put the curser of the file at the start, ranging across the import offset
+        DWORD nameOffset = rvaToOffset(importDesc->Name, &pe->Sections); 
+        if (nameOffset == 0) {
+            fprintf(stderr, "Failed to convert Name RVA to offset: 0x%X\n", importDesc->Name);
+            break;
+        }
+        printf("Reading DLL name RVA: 0x%X\n", importDesc->Name);
 
-        IMAGE_IMPORT_DESCRIPTOR importDesc; //declaration
-        int loopCounter = 0;
-        while (1) {
-            if (loopCounter++ > 100) break;
-            fread(&importDesc, sizeof(IMAGE_IMPORT_DESCRIPTOR), 1, file);//read the file - gets the address,size , how many blocks to read and the file.
-            if (importDesc.OriginalFirstThunk == 0 && importDesc.Name == 0)
-                break;
-
-            DWORD nameOffset = rvaToOffset(importDesc.Name, sectionHeaders); //use the function and get the offset of the certain import
-            if (nameOffset == 0) {
-                fprintf(stderr, "Failed to convert Name RVA to offset: 0x%X\n", importDesc.Name);
-                break;
-            }
-            fseek(file, nameOffset, SEEK_SET); //put curser at the start of the file
-            printf("Reading DLL name RVA: 0x%X\n", importDesc.Name);
-
-            char dllname[256];
-            fgets(dllname, sizeof(dllname), file); //reads a line/string of the file
-            printf("DLL: %s\n", dllname);
+        char dllname[256];
+        char* dllname = (char*)(pe->Base + importOffset);
+        printf("DLL: %s\n", dllname);
     }
 }
 
 
-void printExports(IMAGE_SECTION_HEADER* sectionHeaders) {
-    DWORD exportRVA = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress; //get the VA of exports, inside the ntheaders and then the optional header,dataDIR
-    DWORD exportOffset = rvaToOffset(exportRVA, sectionHeaders); //use the function and get the export offset
-    
-
-    fseek(file, exportOffset, SEEK_SET);//put the curser where the offset begins at the start of it
-
+void PrintExports(PPE_FILE pe) {
+    DWORD exportRVA = pe->NtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress; //get the VA of exports, inside the ntheaders and then the optional header,dataDIR
+    DWORD exportOffset = rvaToOffset(exportRVA, &pe->Sections); //use the function and get the export offset
     IMAGE_EXPORT_DIRECTORY exportDirectory;
-    fread(&exportDirectory, sizeof(IMAGE_EXPORT_DIRECTORY), 1, file); //read the file - gets the addr and the size,one block to read 
-
-    DWORD nameArrayOffset = rvaToOffset(exportDirectory.AddressOfNames, sectionHeaders);//gets nameArrayOffset - to know where the array begins to then start the curser there
+    DWORD nameArrayOffset = rvaToOffset(exportDirectory.AddressOfNames, &pe->Sections);//gets nameArrayOffset - to know where the array begins to then start the curser there
     for (int i = 0; i < exportDirectory.NumberOfNames; i++) {
         DWORD nameRVA;
-        fseek(file, nameArrayOffset + i * sizeof(DWORD), SEEK_SET);//start the curser where the array begins
-        fread(&nameRVA, sizeof(DWORD), 1, file);//read the file, geting the addr of the RVA of the name.
-
-        DWORD functionNameOffset = rvaToOffset(nameRVA,  sectionHeaders); //get the offset of the function name
-        fseek(file, functionNameOffset, SEEK_SET);//put the curser to start wheere the offset begins
+        DWORD functionNameOffset = rvaToOffset(nameRVA,  &pe->Sections); //get the offset of the function name
 
         char functionName[256];
-        fgets(functionName, sizeof(functionName), file);//reads a line inside the file
+        char* functionName = (char*)(pe->Base + functionNameOffset);
         printf("Exported Function: %s\n", functionName);
     }
 }
 
     
-int main(){
-    printf("program started");
-    file = fopen("testPE.exe", "rb");
-    if (!file) {
-        printf("Failed to open file\n");
-        return 1;
-    }
-    printf("File opened successfully\n");
-    fread(&dosHeader, sizeof(IMAGE_DOS_HEADER), 1, file);
-    if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) { //if the e_magic does not start with MZ , its not valid
-        printf("Not a valid PE file\n");
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <pe-file>\n", argv[0]);
         return 1;
     }
 
-    fseek(file, dosHeader.e_lfanew, SEEK_SET);// put the curser to the file where the e_ifanew field starts
-    fread(&ntHeaders, sizeof(IMAGE_NT_HEADERS), 1, file); //read ntheaders
-    if (ntHeaders.Signature != IMAGE_NT_SIGNATURE) {
-        printf("Not a valid PE file\n");
+    PPE_FILE pe = LoadPeFile(argv[1]);
+    if (!pe) {
+        fprintf(stderr, "Failed to load PE file\n");
         return 1;
     }
 
-    //memory allocation once we have the ntHeaders number of sections
-    sectionHeaders = malloc(sizeof(IMAGE_SECTION_HEADER) * ntHeaders.FileHeader.NumberOfSections);
-    if (!sectionHeaders) {
-        printf("Memory allocation failed\n");
-        return 1;
-    }
+    ShowImports(pe);
+    PrintExports(pe);
 
-    fread(sectionHeaders, sizeof(IMAGE_SECTION_HEADER), ntHeaders.FileHeader.NumberOfSections, file); //reads the file sectionHeaders number of times and then puts each section header in the SectionHeaders array
-
-    for (int i = 0; i < ntHeaders.FileHeader.NumberOfSections; i++) {
-        printf("Section Header: %.8s\n", sectionHeaders[i].Name);
-    }
-
-    DWORD importRVA = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-    if (importRVA != 0)
-        printImports(importRVA);
-
-    DWORD exportRVA = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-    if (exportRVA != 0) 
-        printExports(sectionHeaders);
-
-    fclose(file);
-    free( sectionHeaders); //free memory
+    DestroyPeFile(pe);
     return 0;
 }
-
-
 
