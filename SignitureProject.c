@@ -1,15 +1,28 @@
 #include <windows.h>
 #include <stdio.h>
+#include <wchar.h>
 #include <bcrypt.h> //for CNG objects
 #pragma comment(lib, "bcrypt")
 
 
 
-int wmain(int argc, wchar_t* argv[]) {
+int wmain(int argc, wchar_t* argv[]) { //wchar_t* - for Unicode support wide characters
+    
     if (argc != 2) {
-        fwprintf(stderr, L"Usage: %s <path-to-exe>\n", argv[0]); //stderr is standart error - output stream used to output error messages
+        fwprintf(stderr, L"Usage: %s <C:\\Users\\alexd\\Desktop\\Yasmin\\SignitureProject>\n", argv[0]); //stderr is standart error - output stream used to output error messages
         return 1;
     }
+
+    char pePath[MAX_PATH]; //Creates a buffer to hold the file path in regular char format  ,MAX_PATH is the max path range allowed - 260
+    wcstombs(pePath, argv[1], MAX_PATH); // Convert from wchar_t* to char* , wcstombs() = wide-char-string-to-multibyte-string
+
+    PPE_FILE pe = LoadPeFile(pePath);
+    if (!pe) {
+        fwprintf(stderr, L"Could not parse PE file headers.\n");
+        return 1;
+    }
+
+    
     LPCWSTR path = argv[1]; //LPCWSTR 32-bit pointer to a constant string of 16-bit
     //first step is to create an handle to the file 
     HANDLE hFile = CreateFileW(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
@@ -17,15 +30,23 @@ int wmain(int argc, wchar_t* argv[]) {
         fwprintf(stderr, L"Cannot open %s: %08X\n", path, GetLastError()); //if the handle value is invalid we print the error, 8 chars.
         return 1;
     }
+    //getting the check_sum offsets:
+    CheckSumOffset = (DWORD)((BYTE*)pe->NTHeader.OptionalHeader.CheckSum - pe->Base);
 
-    // 3) Initialize CNG SHA-256 - basiclly the hasing algoritm
+    //need to get the certification table entry(which tell us where the signiture is stored) spesifications so i can skip over it while hashing:
+    IMAGE_DATA_DIRECTORY certDir = pe->NtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]; //
+    DWORD certDirOffset = (DWORD)((BYTE*)&pe->NtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY] - pe->Base);
+    DWORD certTableOffset = certDir.VirtualAddress;
+    DWORD certTableSize =certDir.Size;
+
+    // Initialize CNG SHA-256 - basiclly the hasing algoritm
     BCRYPT_ALG_HANDLE  hAlg  = NULL; //handle to the algoritm
     BCRYPT_HASH_HANDLE hHash = NULL; //handle for the hash
     NTSTATUS status = BCryptOpenAlgorithmProvider(&hAlg,BCRYPT_SHA256_ALGORITHM,NULL, 0);
     //NTSTUTUS - data type that stores a status code returned by windows api functions/
     //this call of function sets up the hashing engine so we can use it.
 
-    if (status != STATUS_SUCCESS) { //STUTUS_SUCESS indicates if the function was completed succesfully
+    if (status != 0) { //STUTUS_SUCESS indicates if the function was completed succesfully
         fwprintf(stderr, L"OpenAlgorithmProvider failed: %08X\n", status);
         CloseHandle(hFile);
         return 1;
@@ -35,8 +56,8 @@ int wmain(int argc, wchar_t* argv[]) {
     //the value of the third parameter is NULL and the value of the fourt parameter is zero, the memory for the hash object is allocated and freed by this function. 
     //the fifth parameter is null because when we calledBCrtpthAlgoritmProvider we didnt use the flag : BCRYPTH_ALG_HANDLE_HMAC_FLAG , just in this case this paramenetr could be other thqan NULL.
 
-    if (status != STATUS_SUCCESS) {
-        fwprintf(stderr, L"CreateHash failed: %08X\n", st);
+    if (status != 0) {
+        fwprintf(stderr, L"CreateHash failed: %08X\n", status);
         BCryptCloseAlgorithmProvider(hAlg, 0); // give the handle for the alg and 0 for the second paramenter because there are no flags are defined for this function.
         CloseHandle(hFile);
         return 1;
@@ -44,27 +65,29 @@ int wmain(int argc, wchar_t* argv[]) {
 
     BYTE  buffer[4096];
     DWORD bytesRead;
-    while (ReadFile(hFile, buffer, sizeof buffer, &bytesRead, NULL) && bytesRead) {
+    SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+    HashRange(hFile, hHash, 0, checksumOffset);
+    while (ReadFile(hFile, buffer, CheckSumOffset, &bytesRead, NULL) && bytesRead) {
         status = BCryptHashData(hHash, buffer, bytesRead, 0); //meanwhile reading the file we update the status by performing an one way hash.
-        if (status != STATUS_SUCCESS) {
+        if (status != 0) {
             fwprintf(stderr, L"HashData failed: %08X\n", status);
             break;
         }
     }
     CloseHandle(hFile);
 
-    if (status == STATUS_SUCCESS) { // after all the steps of setting up the hash
+    if (status == 0) { // after all the steps of setting up the hash
         DWORD hashLen = 0, cbNeeded = 0;
         status = BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH,(PUCHAR)&hashLen, sizeof hashLen,&cbNeeded, 0);
         /* function retrieves the value of a named property for a CNG object. 
         BCRYPT_HASH_LENGTH L"HashDigestLength" The size, in bytes, of the hash value of a hash provider. This data type is a DWORD.*/
 
-        if (status == STATUS_SUCCESS) {
+        if (status == 0) {
             BYTE digest[32];
             status = BCryptFinishHash(hHash, digest, hashLen, 0); 
             /*BCryptFinishHash function retrieves the hash or Message Authentication Code (MAC) value for the data accumulated from prior calls to BCryptHashData.
             Returns a status code that indicates the success or failure of the function.*/
-            if (status == STATUS_SUCCESS) {
+            if (status == 0) {
                 for (DWORD i = 0; i < hashLen; i++) 
                     printf("%02x", digest[i]); //for loop from 0 to the length of the hash, printing each object inside digest array , 2 char output.
                 printf("\n");
@@ -81,6 +104,71 @@ int wmain(int argc, wchar_t* argv[]) {
     if (hHash) BCryptDestroyHash(hHash);
     if (hAlg ) BCryptCloseAlgorithmProvider(hAlg, 0);
 
-    return (status == STATUS_SUCCESS) ? 0 : 1;
+    return (status == 0) ? 0 : 1;
 }
 
+//outside of main - blocks from the PE PARSER, struct PE FILE, DestroyPE , LoadPE and RvaToOffset.
+typedef struct _PE_FILE {
+    HANDLE   hFile;
+    HANDLE   hMap;
+    PBYTE    Base;       // pointer to start of file in memory
+    SIZE_T   Size;       // file size
+
+    IMAGE_DOS_HEADER*    DosHdr;    
+    IMAGE_NT_HEADERS* NtHeader;
+    IMAGE_SECTION_HEADER* Sections;
+} PE_FILE, *PPE_FILE;
+
+
+
+VOID DestroyPeFile(PPE_FILE pe) {
+    if (!pe) return;
+    if (pe->Base)  UnmapViewOfFile(pe->Base);
+    if (pe->hMap)  CloseHandle(pe->hMap);
+    if (pe->hFile) CloseHandle(pe->hFile);
+    free(pe);
+}
+
+PPE_FILE LoadPeFile(PCHAR FilePath) {
+    PPE_FILE pe = calloc(1, sizeof *pe);
+    if(!pe){
+        return NULL;
+    }
+
+    pe->hFile = CreateFileA(FilePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (pe->hFile == INVALID_HANDLE_VALUE) goto fail;
+
+    pe->hMap = CreateFileMappingA(pe->hFile,NULL,PAGE_READONLY,0, 0,NULL);
+    if (!pe->hMap) goto fail;
+
+    pe->Base = (PBYTE)MapViewOfFile(pe->hMap,FILE_MAP_READ,0,0,0);
+    if (!pe->Base) goto fail;
+
+    pe->Size = GetFileSize(pe->hFile, NULL);
+
+    pe->DosHdr = (IMAGE_DOS_HEADER*)pe->Base;
+    if (pe->DosHdr->e_magic != IMAGE_DOS_SIGNATURE) goto fail;
+    pe->NtHeader = (IMAGE_NT_HEADERS*)(pe->Base + pe->DosHdr->e_lfanew);
+    if (pe->NtHeader->Signature != IMAGE_NT_SIGNATURE) goto fail;
+    pe->Sections = (IMAGE_SECTION_HEADER*)((PBYTE)&pe->NtHeader->OptionalHeader + pe->NtHeader->FileHeader.SizeOfOptionalHeader);
+    return pe;
+
+fail:
+    DestroyPeFile(pe);
+    return NULL;
+}
+
+
+DWORD RvaToOfs(PPE_FILE pe, DWORD Rva) {
+    WORD n = pe->NtHeader->FileHeader.NumberOfSections;
+    for(int i = 0; i<n ;i++){
+    DWORD sectionVA = pe->Sections[i].VirtualAddress; //virtual address
+    DWORD sectionSize = max(pe->Sections[i].SizeOfRawData, pe->Sections[i].Misc.VirtualSize);   
+    if(Rva >= sectionVA && Rva < sectionVA +sectionSize ){ //checks if the rva is located inside the virtual range of this section
+        DWORD delta = Rva - sectionVA; 
+        return pe->Sections[i].PointerToRawData +delta; // sectionHeaders[i].PointerToRawData - gives the offset to the raw data in the section and we add the delta to it.
+    }
+    } 
+    fprintf(stderr, "Failed to find RVA offset for: 0x%X\n", Rva);
+    return 0;
+  }
