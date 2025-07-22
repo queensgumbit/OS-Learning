@@ -111,7 +111,7 @@ int main(int argc,char* argv[]){
         return 1;
     }
     //getting the check_sum offsets:
-    DWORD CheckSumOffset = (DWORD)((BYTE*)&pe->NtHeader->OptionalHeader.CheckSum - pe->Base);
+    DWORD CheckSumOffset = RvaToOfs(pe ,(DWORD)((BYTE*)&pe->NtHeader->OptionalHeader.CheckSum - pe->Base));
     DWORD CheckSumFiledSize = sizeof(DWORD);
 
     //need to get the certification table entry(which tell us where the signiture is stored) spesifications so i can skip over it while hashing:
