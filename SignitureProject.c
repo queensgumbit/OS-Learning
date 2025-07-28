@@ -107,8 +107,6 @@ void DumpHex(const BYTE* data, DWORD length, DWORD startOffset) {
 
 
 
-
- 
 int main(int argc,char* argv[]){ 
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <C:\\Users\\alexd\\Desktop\\Yasmin\\SignitureProject>\n", argv[0]); //stderr is standart error - output stream used to output error messages
@@ -145,8 +143,13 @@ int main(int argc,char* argv[]){
                      sizeof(DWORD) +
                      sizeof(IMAGE_FILE_HEADER) +
                      offsetof(IMAGE_OPTIONAL_HEADER32, CheckSum);
-}
+    }
 
+    DWORD SecurityDDOffset = pe->DosHdr->e_lfanew +
+                         sizeof(DWORD) +
+                         sizeof(IMAGE_FILE_HEADER) +
+                         offsetof(IMAGE_OPTIONAL_HEADER, DataDirectory) +
+                         IMAGE_DIRECTORY_ENTRY_SECURITY * sizeof(IMAGE_DATA_DIRECTORY);
 
     //need to get the certification table entry(which tell us where the signiture is stored) spesifications so i can skip over it while hashing:
     IMAGE_DATA_DIRECTORY certDir = pe->NtHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]; //
@@ -181,14 +184,16 @@ int main(int argc,char* argv[]){
     }
 
     HashRange(hFile, hHash , 0, CheckSumOffset); // hashing the file till checksum offsets
-    // Hash from end of checksum to start of cert table
+    // Hash from end of checksum to start of security data directory 
+    HashRange(hFile, hHash, CheckSumOffset + CheckSumFieldSize, SecurityDDOffset);
+
     if (certTableOffset > 0 && certTableSize > 0) {
-        HashRange(hFile, hHash, CheckSumOffset + CheckSumFieldSize, certTableOffset);
+           HashRange(hFile, hHash, SecurityDDOffset + sizeof(IMAGE_DATA_DIRECTORY), certTableOffset);
         // Hash from end of cert table to EOF
         HashRange(hFile, hHash, certTableOffset + certTableSize, pe->Size);
     } else {
-        // No cert table - > hash everything after checksum
-        HashRange(hFile, hHash, CheckSumOffset + CheckSumFieldSize, pe->Size);
+        // No cert table - > hash everything after security data directory
+        HashRange(hFile, hHash, SecurityDDOffset + sizeof(IMAGE_DATA_DIRECTORY), pe->Size);
     }
 
     if (status == 0) { // after all the steps of setting up the hash
